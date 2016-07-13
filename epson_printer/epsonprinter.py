@@ -1,11 +1,6 @@
-from __future__ import division
-import math
-import io
-import base64
-import numpy as np
 import usb.core
 from functools import wraps
-from PIL import Image
+
 
 ESC = 27
 GS = 29
@@ -87,82 +82,6 @@ def set_print_speed(speed):
         speed]
     return byte_array
 
-
-class PrintableImage:
-    """
-    Container for image data ready to be sent to the printer
-    The transformation from bitmap data to PrintableImage data is explained at the link below:
-    http://nicholas.piasecki.name/blog/2009/12/sending-a-bit-image-to-an-epson-tm-t88iii-receipt-printer-using-c-and-escpos/
-    """
-
-    def __init__(self, data, height):
-        self.data = data
-        self.height = height
-
-    @classmethod
-    def from_image(cls, image):
-        """
-        Create a PrintableImage from a PIL Image
-        :param image: a PIL Image
-        :return:
-        """
-        (w, h) = image.size
-
-        # Thermal paper is 512 pixels wide
-        if w > 512:
-            ratio = 512. / w
-            h = int(h * ratio)
-            image = image.resize((512, h), Image.ANTIALIAS)
-        if image.mode != '1':
-            image = image.convert('1')
-
-        pixels = np.array(list(image.getdata())).reshape(h, w)
-
-        # Add white pixels so that image fits into bytes
-        extra_rows = int(math.ceil(h / 24)) * 24 - h
-        extra_pixels = np.ones((extra_rows, w), dtype=bool)
-        pixels = np.vstack((pixels, extra_pixels))
-        h += extra_rows
-        nb_stripes = h / 24
-        pixels = pixels.reshape(nb_stripes, 24, w).swapaxes(1, 2).reshape(-1, 8)
-
-        nh = int(w / 256)
-        nl = w % 256
-        data = []
-
-        pixels = np.invert(np.packbits(pixels))
-        stripes = np.split(pixels, nb_stripes)
-
-        for stripe in stripes:
-
-            data.extend([
-                ESC,
-                42,  # *
-                33,  # double density mode
-                nl,
-                nh])
-
-            data.extend(stripe)
-            data.extend([
-                27,   # ESC
-                74,   # J
-                48])
-
-        # account for double density mode
-        height = h * 2
-        return cls(data, height)
-
-    def append(self, other):
-        """
-        Append a Printable Image at the end of the current instance.
-        :param other: another PrintableImage
-        :return: PrintableImage containing data from both self and other
-        """
-        self.data.extend(other.data)
-        self.height = self.height + other.height
-        return self
-
-
 class EpsonPrinter:
     """ An Epson thermal printer based on ESC/POS"""
 
@@ -225,57 +144,6 @@ class EpsonPrinter:
     def cut(self):
         """Full paper cut."""
         return FULL_PAPER_CUT
-
-    @write_this
-    def print_image(self, printable_image):
-        dyl = printable_image.height % 256
-        dyh = int(printable_image.height / 256)
-        # Set the size of the print area
-        byte_array = [
-            ESC,
-            87,    # W
-            46,    # xL
-            0,     # xH
-            0,     # yL
-            0,     # yH
-            0,     # dxL
-            2,     # dxH
-            dyl,
-            dyh]
-
-        # Enter page mode
-        byte_array.extend([
-            27,
-            76])
-
-        byte_array.extend(printable_image.data)
-
-        # Return to standard mode
-        byte_array.append(12)
-
-        return byte_array
-
-    def print_images(self, *printable_images):
-        """
-        This method allows printing several images in one shot. This is useful if the client code does not want the
-        printer to make pause during printing
-        """
-        printable_image = reduce(lambda x, y: x.append(y), list(printable_images))
-        self.print_image(printable_image)
-
-    def print_image_from_file(self, image_file, rotate=False):
-        image = Image.open(image_file)
-        if rotate:
-            image = image.rotate(180)
-        printable_image = PrintableImage.from_image(image)
-        self.print_image(printable_image)
-
-    def print_image_from_buffer(self, data, rotate=False):
-        image = Image.open(io.BytesIO(base64.b64decode(data)))
-        if rotate:
-            image = image.rotate(180)
-        printable_image = PrintableImage.from_image(image)
-        self.print_image(printable_image)
 
     @write_this
     def underline_on(self, weight=1):
