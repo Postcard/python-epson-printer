@@ -1,5 +1,9 @@
+import signal
+from contextlib import contextmanager
 import usb.core
-from functools import wraps
+import usb.util
+import time
+
 
 
 ESC = 27
@@ -82,70 +86,106 @@ def set_print_speed(speed):
         speed]
     return byte_array
 
+
+def send_command_to_device(timeout=5000):
+    """ decorator used to send the result of a command to the usb device"""
+    def _send_command_to_device(func):
+        def wrapper(*args, **kwargs):
+            printer = args[0]
+            byte_array = func(*args, **kwargs)
+            printer.write_bytes(byte_array, timeout)
+        return wrapper
+    return _send_command_to_device
+
+
+class TimeoutException(Exception): pass
+
+@contextmanager
+def time_limit(seconds):
+    def signal_handler(signum, frame):
+        raise TimeoutException, "Timed out!"
+    signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+
+
+
 class EpsonPrinter:
     """ An Epson thermal printer based on ESC/POS"""
 
     printer = None
 
-    def __init__(self, id_vendor, id_product, out_ep=0x01):
-        """
-        @param id_vendor  : Vendor ID
-        @param id_product : Product ID
-        @param interface : USB device interface
-        @param in_ep     : Input end point
-        @param out_ep    : Output end point
-        """
+    def __init__(self, id_product):
 
-        self.out_ep = out_ep
+        id_vendor = 0x04b8
 
         # Search device on USB tree and set is as printer
-        self.printer = usb.core.find(idVendor=id_vendor, idProduct=id_product)
-        if self.printer is None:
+        self.device = usb.core.find(idVendor=id_vendor, idProduct=id_product)
+        if self.device is None:
             raise ValueError("Printer not found. Make sure the cable is plugged in.")
 
-        if self.printer.is_kernel_driver_active(0):
+        if self.device.is_kernel_driver_active(0):
             try:
-                self.printer.detach_kernel_driver(0)
+                self.device.detach_kernel_driver(0)
             except usb.core.USBError as e:
-                print("Could not detatch kernel driver: %s" % str(e))
+                print("Could not detach kernel driver: %s" % str(e))
 
-        try:
-            self.printer.set_configuration()
-            self.printer.reset()
-        except usb.core.USBError as e:
-            print("Could not set configuration: %s" % str(e))
+        configuration = self.device.get_active_configuration()
+        interface = configuration[(0, 0)]
 
-    def write_this(func):
-        """
-        Decorator that writes the bytes to the wire
-        """
-        @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            byte_array = func(self, *args, **kwargs)
-            self.write_bytes(byte_array)
-        return wrapper
+        def out_endpoint_match(ep):
+            return usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT
 
-    def write_bytes(self, byte_array):
+        self.out_endpoint = usb.util.find_descriptor(interface, custom_match=out_endpoint_match)
+
+        def in_endpoint_match(ep):
+            return usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN
+
+        self.in_endpoint = usb.util.find_descriptor(interface, custom_match=in_endpoint_match)
+
+
+    def write_bytes(self, byte_array, timeout=5000):
         msg = ''.join([chr(b) for b in byte_array])
-        self.write(msg)
+        self.write(msg, timeout)
 
-    def write(self, msg):
-        self.printer.write(self.out_ep, msg, timeout=20000)
+    def write(self, msg, timeout=5000):
+        self.out_endpoint.write(msg, timeout=timeout)
+
+    def read(self):
+        try:
+            return self.in_endpoint.read(self.in_endpoint.wMaxPacketSize)
+        except usb.core.USBError as e:
+            return None
+
+    def blocking_read(self):
+        while True:
+            data = self.read()
+            if len(data) > 0:
+                return data[0]
+
+    def flush_read(self):
+        while True:
+            data = self.read()
+            if not data or len(data) == 0:
+                break
 
     def print_text(self, msg):
         self.write(msg)
 
-    @write_this
+    @send_command_to_device()
     def linefeed(self, lines=1):
         """Feed by the specified number of lines."""
         return linefeed(lines)
 
-    @write_this
+    @send_command_to_device()
     def cut(self):
         """Full paper cut."""
         return FULL_PAPER_CUT
 
-    @write_this
+    @send_command_to_device()
     def underline_on(self, weight=1):
         """ Activate underline
          weight = 0     1-dot-width
@@ -153,46 +193,67 @@ class EpsonPrinter:
         """
         return underline_on(weight)
 
-    @write_this
+    @send_command_to_device()
     def underline_off(self):
         return UNDERLINE_OFF
 
-    @write_this
+    @send_command_to_device()
     def bold_on(self):
         return BOLD_ON
 
-    @write_this
+    @send_command_to_device()
     def bold_off(self):
         return BOLD_OFF
 
-    @write_this
+    @send_command_to_device()
     def set_line_spacing(self, dots):
         """Set line spacing with a given number of dots.  Default is 30."""
         return set_line_spacing(dots)
 
-    @write_this
+    @send_command_to_device()
     def set_default_line_spacing(self):
         return DEFAULT_LINE_SPACING
 
-    @write_this
+    @send_command_to_device()
     def set_text_size(self, width_magnification, height_magnification):
         """Set the text size.  width_magnification and height_magnification can
         be between 0(x1) and 7(x8).
         """
         return set_text_size(width_magnification, height_magnification)
 
-    @write_this
+    @send_command_to_device()
     def center(self):
         return CENTER
 
-    @write_this
+    @send_command_to_device()
     def left_justified(self):
         return LEFT_JUSTIFIED
 
-    @write_this
+    @send_command_to_device()
     def right_justified(self):
         return RIGHT_JUSTIFIED
 
-    @write_this
+    @send_command_to_device()
     def set_print_speed(self, speed):
         return set_print_speed(speed)
+
+    @send_command_to_device(timeout=1)
+    def transmit_real_time_status(self, n):
+        return [16, 4, n]
+
+    def paper_present(self):
+        self.flush_read()
+        try:
+            self.transmit_real_time_status(4)
+            with time_limit(1):
+                data = self.blocking_read()
+                return data == 18
+        except:
+            return False
+
+
+
+
+
+
+
