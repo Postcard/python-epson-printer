@@ -2,8 +2,8 @@ import signal
 from contextlib import contextmanager
 import usb.core
 import usb.util
-import time
 
+from .utils import to_hex, byte_to_bits
 
 
 ESC = 27
@@ -148,7 +148,7 @@ class EpsonPrinter:
 
 
     def write_bytes(self, byte_array, timeout=5000):
-        msg = ''.join([chr(b) for b in byte_array])
+        msg = to_hex(byte_array)
         self.write(msg, timeout)
 
     def write(self, msg, timeout=5000):
@@ -247,7 +247,8 @@ class EpsonPrinter:
             self.transmit_real_time_status(4)
             with time_limit(1):
                 data = self.blocking_read()
-                return data == 18
+                bits = byte_to_bits(data)
+                return bits[5] == 0
         except:
             return False
 
